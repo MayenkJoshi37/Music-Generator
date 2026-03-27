@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual env
+env/
+venv/
+dlcp1/
+
+# Models (optional - large files)
+*.h5
+
+# Data
+dataset/
+
+# Generated files
+generated_music/
+
+# OS
+.DS_Store
+Thumbs.db

@@ -69,7 +69,6 @@ streamlit run app.py
 ## ⚠️ Notes
 
 * Model file (`.h5`) is required to run backend
-* Dataset is not included in repo
 * First run may take time (model loading)
 
 ---

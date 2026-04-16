@@ -18,7 +18,7 @@ pip install -r requirements.txt
 ### 2. Start Backend (Flask)
 
 ```bash
-python backend_api.py
+python server.py
 ```
 
 ### 3. Start Frontend (Streamlit)
@@ -31,7 +31,7 @@ streamlit run app.py
 
 ## 📂 Project Structure
 
-### 🔹 backend_api.py
+### 🔹 server.py
 
 * Flask server
 * Loads trained model

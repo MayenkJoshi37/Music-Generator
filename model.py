@@ -2,10 +2,20 @@ import glob
 import numpy as np
 from music21 import converter, instrument, note, chord, stream
 from keras.models import Sequential
-from keras.layers import LSTM, Dense, Dropout
+from keras.layers import LSTM, Dense, Dropout, BatchNormalization
 from keras.utils import to_categorical
-from keras.callbacks import ModelCheckpoint
+from keras.callbacks import ModelCheckpoint, EarlyStopping, ReduceLROnPlateau, Callback
 import tensorflow as tf
+from keras import mixed_precision
+import time
+
+# =========================
+# TRAINING CONFIG
+# =========================
+SEQUENCE_LENGTH = 50
+MAX_EPOCHS = 60
+BATCH_SIZE = 128
+MAX_TRAIN_MINUTES = 28  # keep under ~30 mins wall-time
 
 def get_device():
     gpus = tf.config.list_physical_devices('GPU')
@@ -21,6 +31,27 @@ def get_device():
     return "/CPU:0"
 
 DEVICE = get_device()
+
+if DEVICE == "/GPU:0":
+    # Faster matmul on RTX cards; keeps final softmax dense output in float32.
+    mixed_precision.set_global_policy("mixed_float16")
+    print("✅ Mixed precision enabled")
+
+
+class TimeLimitCallback(Callback):
+    def __init__(self, max_minutes=28):
+        super().__init__()
+        self.max_seconds = max_minutes * 60
+        self.start_time = None
+
+    def on_train_begin(self, logs=None):
+        self.start_time = time.time()
+
+    def on_epoch_end(self, epoch, logs=None):
+        elapsed = time.time() - self.start_time
+        if elapsed > self.max_seconds:
+            print(f"\n⏱️ Time limit reached ({self.max_seconds/60:.0f} min). Stopping training.")
+            self.model.stop_training = True
 # =========================
 # 1. LOAD DATA
 # =========================
@@ -49,7 +80,7 @@ def load_notes(dataset_path):
 # 2. PREPARE DATA
 # =========================
 
-def prepare_sequences(notes, sequence_length=50):
+def prepare_sequences(notes, sequence_length=SEQUENCE_LENGTH):
     pitchnames = sorted(set(notes))
     note_to_int = dict((note, number) for number, note in enumerate(pitchnames))
 
@@ -78,11 +109,18 @@ def prepare_sequences(notes, sequence_length=50):
 def create_model(input_shape, output_dim):
     model = Sequential()
     model.add(LSTM(256, input_shape=input_shape, return_sequences=True))
+    model.add(BatchNormalization())
     model.add(Dropout(0.3))
-    model.add(LSTM(256))
-    model.add(Dense(output_dim, activation='softmax'))
+    model.add(LSTM(256, return_sequences=True))
+    model.add(BatchNormalization())
+    model.add(Dropout(0.3))
+    model.add(LSTM(128))
+    model.add(Dense(256, activation='relu'))
+    model.add(Dropout(0.25))
+    model.add(Dense(output_dim, activation='softmax', dtype='float32'))
 
-    model.compile(loss='categorical_crossentropy', optimizer='adam')
+    loss = tf.keras.losses.CategoricalCrossentropy(label_smoothing=0.03)
+    model.compile(loss=loss, optimizer='adam')
     return model
 
 
@@ -133,6 +171,9 @@ if __name__ == "__main__":
 
     print("Preparing sequences...")
     network_input, network_output, pitchnames = prepare_sequences(notes)
+    print(f"Loaded {len(notes)} notes")
+    print(f"Vocabulary size: {len(pitchnames)}")
+    print(f"Training patterns: {network_input.shape[0]}")
 
     print("Creating model...")
     model = create_model(
@@ -144,18 +185,34 @@ if __name__ == "__main__":
     
     checkpoint = ModelCheckpoint(
         "model.h5",
-        monitor='loss',
+        monitor='val_loss',
         verbose=1,
         save_best_only=True,
         mode='min'
     )
+    early_stop = EarlyStopping(
+        monitor='val_loss',
+        patience=6,
+        restore_best_weights=True,
+        verbose=1
+    )
+    lr_scheduler = ReduceLROnPlateau(
+        monitor='val_loss',
+        factor=0.5,
+        patience=3,
+        min_lr=1e-5,
+        verbose=1
+    )
+    time_limit = TimeLimitCallback(max_minutes=MAX_TRAIN_MINUTES)
     
     model.fit(
         network_input,
         network_output,
-        epochs=30,
-        batch_size=128,
-        callbacks=[checkpoint]
+        epochs=MAX_EPOCHS,
+        batch_size=BATCH_SIZE,
+        validation_split=0.1,
+        callbacks=[checkpoint, early_stop, lr_scheduler, time_limit],
+        verbose=1
     )
     
     # Save final model also

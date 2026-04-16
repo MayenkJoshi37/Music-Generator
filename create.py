@@ -4,6 +4,7 @@ import random
 from music21 import converter, instrument, note, chord, stream
 from keras.models import load_model
 import tensorflow as tf
+from collections import defaultdict
 
 def get_device():
     gpus = tf.config.list_physical_devices('GPU')
@@ -66,33 +67,83 @@ def prepare_sequences(notes, sequence_length=50):
 # 3. SAMPLING (important)
 # =========================
 
-def sample(preds, temperature=0.8):
-    preds = np.log(preds + 1e-8) / temperature
-    exp_preds = np.exp(preds)
-    preds = exp_preds / np.sum(exp_preds)
-    return np.random.choice(len(preds), p=preds)
+def _apply_top_k(probs, top_k):
+    if top_k is None or top_k <= 0 or top_k >= len(probs):
+        return probs
+    top_indices = np.argpartition(probs, -top_k)[-top_k:]
+    filtered = np.zeros_like(probs)
+    filtered[top_indices] = probs[top_indices]
+    total = np.sum(filtered)
+    return filtered / total if total > 0 else probs
+
+
+def _apply_top_p(probs, top_p):
+    if top_p is None or top_p <= 0 or top_p >= 1:
+        return probs
+    sorted_idx = np.argsort(probs)[::-1]
+    sorted_probs = probs[sorted_idx]
+    cumulative = np.cumsum(sorted_probs)
+    cutoff = np.searchsorted(cumulative, top_p, side="left") + 1
+    keep_idx = sorted_idx[:cutoff]
+    filtered = np.zeros_like(probs)
+    filtered[keep_idx] = probs[keep_idx]
+    total = np.sum(filtered)
+    return filtered / total if total > 0 else probs
+
+
+def sample(preds, temperature=0.8, top_k=0, top_p=1.0):
+    temp = max(0.1, float(temperature))
+    scaled = np.log(preds + 1e-8) / temp
+    exp_preds = np.exp(scaled - np.max(scaled))
+    probs = exp_preds / np.sum(exp_preds)
+    probs = _apply_top_k(probs, int(top_k) if top_k else 0)
+    probs = _apply_top_p(probs, float(top_p) if top_p else 1.0)
+    return np.random.choice(len(probs), p=probs)
 
 
 # =========================
 # 4. GENERATE NOTES
 # =========================
 
-def generate_notes(model, network_input, pitchnames, n_vocab, length=200):
+def generate_notes(
+    model,
+    network_input,
+    pitchnames,
+    n_vocab,
+    length=200,
+    temperature=0.8,
+    top_k=0,
+    top_p=1.0,
+    repeat_penalty=0.0
+):
     int_to_note = dict((number, note) for number, note in enumerate(pitchnames))
 
     start = random.randint(0, len(network_input)-1)
     pattern = network_input[start]
 
     prediction_output = []
+    generated_counts = defaultdict(int)
 
     for _ in range(length):
         prediction_input = np.reshape(pattern, (1, len(pattern), 1))
 
         prediction = model.predict(prediction_input, verbose=0)
-        index = sample(prediction[0], temperature=0.8)
+        probs = prediction[0].copy()
+        if repeat_penalty and repeat_penalty > 0:
+            for idx, count in generated_counts.items():
+                probs[idx] = probs[idx] / (1.0 + (repeat_penalty * count))
+            probs = probs / np.sum(probs)
+
+        index = sample(
+            probs,
+            temperature=temperature,
+            top_k=top_k,
+            top_p=top_p
+        )
 
         result = int_to_note[index]
         prediction_output.append(result)
+        generated_counts[index] += 1
 
         pattern = np.append(pattern, index / float(n_vocab))
         pattern = pattern[1:]
